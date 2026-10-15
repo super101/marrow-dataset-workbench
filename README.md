@@ -1,64 +1,82 @@
 # Marrow Dataset Workbench
 
-骨髓显微图像数据的本地入库工具与 Codex skill。用于保留原始数据、建立独立工作副本、检查 VOC 图像/XML、核对标签字典并记录来源与后续分组要求。
+以复核为核心的本地骨髓显微图像数据工作台：保留原始资料，修订矩形框和标签，建立类别映射及分组划分，导出可追溯的检测与分类训练包。
 
-**仓库仅提供代码、标准和合成测试，不包含医院数据，也不提供研究使用授权或医学真值。**所有实际数据和生成结果放在仓库之外。入库默认状态为 `provisional`，未解决编码不会被静默删除或自动改成背景。
+**代码仓库与公开演示不包含真实医院数据。数据、草稿、身份表和导出结果均放在仓库之外。** 自动检查不能替代专业标注复核、研究授权或独立测试设计。
 
-## 安装 skill
+## 本地启动
 
-在仓库目录用 Python 3.11+ 运行安装器：
+需要 Python 3.11+，无需 Node.js、GPU 或云服务。Windows 建议明确使用 Python Launcher 的 `py -3.11`，避免默认 `python` 别名指向其他环境。
 
-```console
-python -X utf8 install.py
+下载或克隆项目后，在仓库目录执行：
+
+```powershell
+py -3.11 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e .
+.\start-workbench.cmd -Demo
 ```
 
-安装器将 skill 及三个角色配置安装到 `CODEX_HOME`（未设置时为 `~/.codex`），先备份现有配置，只添加缺失角色；如发现同名 skill 或角色则停止，避免覆盖。角色为 `marrow-data-curator`、`marrow-label-reviewer`、`marrow-grouping-viewer`。它们继承当前模型，不下载独立模型，不启动后台进程。
+首次安装依赖需要访问软件源；启动器不会静默安装任何依赖。启动后打开 `http://127.0.0.1:8765`，演示只生成几何合成图。
 
-也可以只将 `skills/marrow-dataset-intake` 整个目录复制到 Codex 的 skills 目录。下一轮会话发现 skill；重开 Codex 会话以加载新角色。调用：
+无 `py` 命令时，用已安装的 Python 3.11+ 完整路径替换，例如：
+
+```powershell
+& 'C:\Path\To\Python311\python.exe' -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e .
+.\start-workbench.cmd -Demo
+```
+
+真实数据需要由使用者明确登记可读取的根目录：
+
+```powershell
+.\start-workbench.cmd -Workspace 'D:\ResearchWork\marrow' -AllowRoot 'D:\ResearchData'
+```
+
+默认工作空间为用户目录下的 `.marrow-workbench`；可用 `MARROW_WORKSPACE` 和 `MARROW_ALLOW_ROOT` 配置。启动器参数及多根目录、备份和故障说明见[使用手册](docs/USER_GUIDE.md)。程序只监听本机，不是可直接开放公网的服务器。
+
+## 工作流程
+
+1. 导入旧入库工具的工作集，或导入图像与 VOC/XML；选择明确的源坐标约定和标签字典。
+2. 检查结构、未知标签、无效框和重复图标注冲突；在原图上修改矩形框、标签和问题，自动保存草稿。
+3. 固定训练类别映射、研究使用依据和标注完整性规则。
+4. 根据有证据的患者/玻片/来源关系分组，再划分原图；分类裁剪继承父图划分。
+5. 运行导出检查，选择严格复核版或基础检查版，生成 VOC、COCO、YOLO 检测包和单细胞分类包。
+
+基础检查版允许尚未逐图人工确认，但不能绕过未知标签、无效框、授权缺失或跨集合泄漏。普通训练器无法正确处理 ignore 时，相关整图暂缓纳入。分类裁剪单独判断纳入，不把全部检测框自动当成合格单细胞样本。
+
+首版是科研数据准备工具，不训练模型、不生成医学真值；不自动发现全部近重复或重叠视野，不提供真实数据 GitHub 上传、远程多人协作或公网认证。公开网站为合成演示与下载入口，与本地完整版分开。设计范围及验收记录分别见[产品方案](docs/PRODUCT_DESIGN.md)和[发布检查表](docs/RELEASE_CHECKLIST.md)；文档中的设计不等于已经通过验收。
+
+## 安装 Codex skill 和角色
+
+网页工作台可独立使用。需要 Codex 辅助入库时，另行执行：
+
+```powershell
+.\.venv\Scripts\python.exe -X utf8 install.py
+```
+
+安装器将 `marrow-dataset-intake` 和三个角色配置安装至 `CODEX_HOME`（默认 `~/.codex`），备份已有配置，只添加缺失角色，遇同名 skill 或角色停止。重新打开 Codex 会话后调用：
 
 ```text
-用 $marrow-dataset-intake 整理这批骨髓图像，保留原始数据，检查字典和来源，生成工作副本及问题清单。
+用 $marrow-dataset-intake 整理显微图像与 VOC 标注，保留原始数据，核对标签与来源，生成独立工作版本。
 ```
 
-安装后 skill 目录中包含运行脚本与标准，单独安装也能使用。`agents/openai.yaml` 提供 skill 的界面名称和调用提示；[AGENTS.md](AGENTS.md) 定义数据整理、标注质检、分组展示三种协作职责。它们不安装独立模型或后台服务。
+角色为 `marrow-data-curator`、`marrow-label-reviewer`、`marrow-grouping-viewer`，继承当前模型，不另装模型或启动常驻服务。职责见 [AGENTS.md](AGENTS.md)。
 
-## 命令行使用
+原命令行入库工具仍保留：
 
-使用 Python 3.11 或以上版本；入库本身不要求联网或云算力。可选安装 Pillow 以检查解码像素重复并生成缩略图：`python -m pip install Pillow`。无 Pillow 时仍可独立复制与检查文件级重复，并明确报告像素检查缺失。
-
-```console
-python skills/marrow-dataset-intake/scripts/intake.py --help
-python skills/marrow-dataset-intake/scripts/intake.py --source /data/incoming/VOC2007 --dictionary /data/label_dictionary.csv --output /data/work/dataset-v1
-python skills/marrow-dataset-intake/scripts/intake.py --source /data/incoming/VOC2007 --dictionary /data/label_dictionary.csv --output /data/work/dataset-v2 --thumbnails
-python skills/marrow-dataset-intake/scripts/verify.py --source /data/incoming/VOC2007 --workset /data/work/dataset-v1
+```powershell
+.\.venv\Scripts\python.exe skills/marrow-dataset-intake/scripts/intake.py --help
+.\.venv\Scripts\python.exe skills/marrow-dataset-intake/scripts/verify.py --help
 ```
 
-可用 `--metadata /data/identity_metadata.csv` 补充已知身份。以 `--help` 和脚本输出的模板为准；缺失患者/玻片信息留空，不以文件名冒充身份。输出必须是源目录之外尚不存在的新目录。
+标签 CSV 为 `code,name,role`，编码按字符串保留。规则见[入库标准](skills/marrow-dataset-intake/references/intake-standard.md)。旧工作集中的原始 XML 可能保留设备路径，不能直接拿去公开发布。
 
-标签 CSV 最少包含以下字段，编码按字符串保留：
+## 开发与验证
 
-```csv
-code,name,role
-demo_a,示例细胞类别,cell
-demo_ignore,明确忽略对象,ignore
-demo_pending,待复核对象,unresolved
+```powershell
+.\.venv\Scripts\python.exe -m pip install -e .
+.\.venv\Scripts\python.exe -X utf8 -m unittest discover -s tests -v
+.\.venv\Scripts\python.exe -m workbench --help
 ```
 
-`ignore` 要在实际训练/评估框架中实现，不是重命名标签即可。工具完整保留未定义和未解决对象供复核；医学类别仍需专业人员确认。
-
-## 输出和后续工作
-
-入库建立独立工作副本，并产生 `image_manifest.csv`、`object_manifest.csv`、`label_counts.csv`、`source_snapshot.csv`、`identity_to_complete.csv`、`review/issues.csv` 和 `summary.json`。`browse.html` 可直接在本地浏览器打开，支持类别筛选和框叠加；它不修改标注。源数据不会被原地清洗；源冻结采用快照与哈希，不修改源目录权限。XML原文件完整保留（其中可能含源设备路径），不要直接公开它们。
-
-后续训练前按[入库标准](skills/marrow-dataset-intake/references/intake-standard.md)补齐使用依据、标签处置、标注完整性和分组设计。患者优先，玻片次之；裁剪、增强、确认重叠与近重复对象跟随源组。编号或时间代理只能做敏感性分析；格式转换、工作副本和裁剪不增加独立样本量。
-
-本工具不自动生成完整患者独立切分、不自动为细胞赋医学真值，也不承诺自动检测所有近重复/重叠。展示和发布真实样本需要相应权限，代码仓库默认不接收实际数据。论文应分别交代数据来源、处理、历史使用和评估限制。
-
-## 验证
-
-```console
-python -m pip install Pillow
-python -X utf8 -m unittest discover -s tests -v
-```
-
-测试仅生成几何合成图，覆盖源数据不变、独立复制、未知/忽略对象保留、重复标注冲突、工作副本损坏检测及安装配置保留。
+测试使用临时目录和合成图。贡献仅提交代码、通用文档和合成测试；真实图像、标注、身份表及个体文件哈希不进入 Git 历史。MIT 许可适用于本项目代码，不授予外部数据使用权。

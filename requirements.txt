@@ -1,0 +1,2 @@
+# Prefer installation with: <chosen-python> -m pip install -e .
+Pillow>=10.4,<13

@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#126e65">
+  <title>骨髓数据工作台 · Marrow Workbench</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <a class="skip" href="#main">跳到主要内容</a>
+  <aside class="sidebar">
+    <a href="#overview" class="brand"><span class="brand-mark">M<span>+</span></span><span>骨髓数据工作台<small>MARROW WORKBENCH</small></span></a>
+    <div class="local-badge"><i></i> 本地工作空间 <span>原始资料只读</span></div>
+    <label class="dataset-label" for="dataset-select">当前数据集</label>
+    <select id="dataset-select" aria-label="选择数据集"><option value="">尚未导入数据集</option></select>
+    <nav aria-label="工作台导航">
+      <div class="nav-section">数据准备</div>
+      <a href="#overview" data-nav="overview"><span>◫</span> 数据集总览</a>
+      <a href="#import" data-nav="import"><span>↥</span> 导入数据</a>
+      <a href="#review" data-nav="review"><span>⌖</span> 浏览与复核 <b id="nav-pending"></b></a>
+      <a href="#export" data-nav="export"><span>⇲</span> 训练包导出</a>
+      <details id="advanced-nav"><summary>高级设置</summary>
+        <a href="#mapping" data-nav="mapping"><span>≋</span> 类别方案</a>
+        <a href="#groups" data-nav="groups"><span>⊞</span> 身份与分组</a>
+        <a href="#rules" data-nav="rules"><span>☷</span> 来源与规则</a>
+        <a href="#history" data-nav="history"><span>↺</span> 版本与审计</a>
+      </details>
+      <a href="#collaboration" data-nav="collaboration"><span>♧</span> 协作空间 <em>敬请期待</em></a>
+    </nav>
+    <div class="sidebar-foot">研究数据，认真对待。<small>独立副本 · 可追溯复核 · 固定划分</small><a href="https://github.com/super101/marrow-dataset-workbench" target="_blank" rel="noopener noreferrer">项目文档 ↗</a></div>
+  </aside>
+  <div class="workspace">
+    <header class="topbar"><div><span class="eyebrow">DATASET WORKSPACE</span><span id="dataset-heading">开始准备你的训练数据</span><span id="version-badge" class="pill">未选择版本</span></div><div id="save-status" role="status" aria-live="polite">本地运行</div></header>
+    <main id="main" tabindex="-1"><div class="loading">正在连接本地工作空间…</div></main>
+    <footer class="workspace-foot">图像、草稿和训练产物保存在本地。研究用途；技术检查不替代医学复核。</footer>
+  </div>
+  <div id="toast" role="status" aria-live="polite"></div>
+  <dialog id="action-dialog"><form method="dialog"><div id="dialog-content"></div><div class="dialog-actions"><button value="cancel" class="button secondary">取消</button><button id="dialog-confirm" value="confirm" class="button">确认</button></div></form></dialog>
+  <script type="module" src="/static/app.js"></script>
+</body>
+</html>
