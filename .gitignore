@@ -1,0 +1,24 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.env
+*.key
+*.pem
+# Real data and generated local reports must live outside this repository.
+data/
+worksets/
+outputs/
+reports/
+*.jpg
+*.jpeg
+*.png
+*.bmp
+*.tif
+*.tiff
+*.xml
+*.xlsx
+*.pt
+*.pth
+*.zip
+*.rar

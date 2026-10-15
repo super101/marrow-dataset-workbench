@@ -1,0 +1,4 @@
+code,name,role
+demo_a,Synthetic cell class,cell
+demo_ignore,Explicit ignore object,ignore
+demo_pending,Unresolved annotation,unresolved

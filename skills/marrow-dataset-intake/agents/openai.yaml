@@ -1,0 +1,6 @@
+interface:
+  display_name: "骨髓数据集入库"
+  short_description: "创建独立工作副本，核查标签来源与分组泄漏并列出待复核事项"
+  default_prompt: "使用 $marrow-dataset-intake 整理本地骨髓图像和 VOC 标注，保留原始数据，生成可追溯工作版本与入库问题清单。"
+policy:
+  allow_implicit_invocation: true
