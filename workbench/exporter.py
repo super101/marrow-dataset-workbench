@@ -69,13 +69,15 @@ def _index(dataset):
 
 
 def image_issues(dataset, image):
-    """Return current structural and semantic blockers for one image."""
+    """Return structural errors and advisory review notes for one image."""
     index = _index(dataset)
     mapping = index["mapping"]
     issues = []
 
-    def add(kind, detail, obj=None):
+    def add(kind, detail, obj=None, severity="error"):
         value = {"kind": kind, "detail": detail}
+        if severity != "error":
+            value["severity"] = severity
         if obj is not None:
             value["object_id"] = obj.get("id")
         issues.append(value)
@@ -86,19 +88,12 @@ def image_issues(dataset, image):
     if len(object_ids) != len(set(object_ids)) or any(not oid for oid in object_ids):
         add("invalid_object_id", "Object identifiers must be present and unique within each image")
     for issue in image.get("import_issues", []):
-        add("import_error", str(issue))
+        add("import_error", str(issue), severity="warning" if issue == "identity_without_evidence" else "error")
     for obj in image.get("objects", []):
         entry = mapping.get(str(obj.get("code", "")))
         if obj.get("deleted"):
-            reason = str(obj.get("delete_reason", "")).strip()
-            if not reason:
-                add("unsafe_deletion", "Deleted annotation requires a reason", obj)
-            elif (entry is None or entry.get("role") in ("ignore", "unresolved")) and not reason.startswith("false_annotation:"):
-                add("unsafe_deletion", "Removing an unresolved/ignore object requires documented false_annotation evidence", obj)
-            elif entry and entry.get("role") == "cell" and not reason.startswith("false_annotation:"):
-                add("unsafe_deletion", "Deleting a target cannot turn it into background; correct its label, document false_annotation, or exclude the image", obj)
-            elif entry and entry.get("role") == "out_of_scope" and not (entry.get("evidence") and dataset.get("rules", {}).get("task_definition")):
-                add("out_of_scope_rule", "Excluded task objects require evidence and a fixed task definition", obj)
+            # Deletion is an operator decision, not a claim of false annotation.
+            # The working record and audit history preserve it without a reason.
             continue
         if not _valid_box(obj.get("bbox"), image.get("width", 0), image.get("height", 0)):
             add("invalid_box", "Box must be finite, positive, and within image bounds", obj)
@@ -108,15 +103,15 @@ def image_issues(dataset, image):
             add(entry["role"], "Whole image deferred: ordinary output trainers cannot safely ignore this object", obj)
         elif entry.get("role") == "out_of_scope":
             if not entry.get("evidence") or not dataset.get("rules", {}).get("task_definition"):
-                add("out_of_scope_rule", "Out-of-scope background requires evidence and a fixed task definition", obj)
+                add("out_of_scope_rule", "Out-of-scope task definition or supporting evidence is not recorded", obj, "warning")
         elif entry.get("role") != "cell":
             add("unknown_role", "Unsupported dictionary role", obj)
         elif not str(entry.get("train_name") or entry.get("name") or "").strip():
             add("missing_train_name", "Training class has no name", obj)
         elif not str(entry.get("evidence", "")).strip():
-            add("missing_label_evidence", "Training class requires documented dictionary or review evidence", obj)
+            add("missing_label_evidence", "Training class definition evidence is not recorded", obj, "warning")
         if obj.get("question"):
-            add("question", "Object has an unresolved question", obj)
+            add("question", "Object has an unresolved question", obj, "warning")
     return issues
 
 
@@ -162,9 +157,8 @@ def _identity_errors(images, scope):
     if scope not in ("patient", "slide", "component"):
         return ["Scope must be patient, slide, or component"]
     required = {"patient": "patient_id", "slide": "slide_id"}.get(scope)
-    if required and any(not im.get("metadata", {}).get(required)
-                        or not im.get("metadata", {}).get("metadata_evidence") for im in images):
-        errors.append(f"{scope} scope requires complete identity and source evidence for all included images")
+    if required and any(not im.get("metadata", {}).get(required) for im in images):
+        errors.append(f"{scope} scope requires complete identity for all included images")
     slides = {}
     for im in images:
         meta = im.get("metadata", {})
@@ -173,6 +167,13 @@ def _identity_errors(images, scope):
     if any(len(patients) > 1 for patients in slides.values()):
         errors.append("A slide is linked to conflicting patient identities")
     return errors
+
+
+def _identity_warnings(images):
+    if any(any(im.get("metadata", {}).get(key) for key in ("patient_id", "slide_id", "source_image_id"))
+           and not str(im.get("metadata", {}).get("metadata_evidence", "")).strip() for im in images):
+        return ["Identity/source values are supplied without recorded supporting evidence; their accuracy is the operator's responsibility"]
+    return []
 
 
 def plan_split(dataset, ratios, seed, scope):
@@ -208,7 +209,7 @@ def plan_split(dataset, ratios, seed, scope):
         assignments.update({iid: SPLITS[i] for iid in members[group]})
     return {"version": int(dataset.get("split", {}).get("version", 0)) + 1,
             "confirmed": False, "scope": scope, "seed": seed, "ratios": ratios,
-            "groups": groups, "assignments": assignments}
+            "groups": groups, "assignments": assignments, "warnings": _identity_warnings(images)}
 
 
 def _asset(workspace, image):
@@ -278,8 +279,6 @@ def _crop_candidate(image, obj, margin, minimum, mode):
     if "edge_or_truncation" in flags:
         if review != "include":
             reasons.append("edge_or_truncation")
-        elif not str(obj.get("crop_note", "")).strip():
-            reasons.append("risk_override_requires_crop_note")
     return box, flags, sorted(set(reasons))
 
 
@@ -309,11 +308,13 @@ def preflight(dataset, options, workspace):
         margin, minimum = 0, 8
     rules = dataset.get("rules", {})
     if rules.get("research_permission") != "verified" or not str(rules.get("permission_evidence", "")).strip():
-        blockers.append("Research permission must be verified with documented evidence")
+        report["warnings"].append("Research permission or supporting evidence is not verified in this workspace; export does not grant permission to use or redistribute data")
     if "coordinate_verified" in rules and (rules.get("coordinate_verified") != "verified"
             or not str(rules.get("coordinate_evidence", "")).strip()):
-        blockers.append("Confirm source coordinate interpretation against image overlays")
+        report["warnings"].append("Source coordinate interpretation has not been recorded as verified against image overlays")
     exhaustive = rules.get("annotation_policy") == "exhaustive" and bool(str(rules.get("annotation_evidence", "")).strip())
+    if not exhaustive:
+        report["warnings"].append("Exhaustive annotation policy or supporting evidence is not recorded; unmarked objects may be treated as background by detection trainers")
     split = dataset.get("split", {})
     if not split.get("confirmed"):
         blockers.append("Confirm the fixed group split before export")
@@ -324,17 +325,21 @@ def preflight(dataset, options, workspace):
         blockers.append("Duplicate image identifiers")
     if not report["classes"]:
         blockers.append("No defined training classes")
+    advisory_counts = {}
     for image in dataset.get("images", []):
         iid = image["id"]
         reasons = []
         if image.get("exclude_reason"):
             reasons.append("explicitly_excluded")
         else:
-            reasons.extend(sorted({x["kind"] for x in image_issues(dataset, image)}))
+            issues = image_issues(dataset, image)
+            reasons.extend(sorted({x["kind"] for x in issues if x.get("severity") != "warning"}))
+            for kind in {x["kind"] for x in issues if x.get("severity") == "warning"}:
+                advisory_counts[kind] = advisory_counts.get(kind, 0) + 1
             if mode == "strict" and image.get("review_state") != "confirmed":
                 reasons.append("image_not_confirmed")
-            if not image.get("annotations_complete") and (mode == "strict" or not exhaustive):
-                reasons.append("annotation_completeness_unconfirmed")
+            if not image.get("annotations_complete"):
+                advisory_counts["annotation_completeness_unconfirmed"] = advisory_counts.get("annotation_completeness_unconfirmed", 0) + 1
             if split.get("assignments", {}).get(iid) not in SPLITS:
                 reasons.append("missing_split_assignment")
             if split.get("groups", {}).get(iid) != groups[iid]:
@@ -374,6 +379,16 @@ def preflight(dataset, options, workspace):
                         "bbox": box, "split": s, "class_id": _class_id(obj, entries, report["classes"]), "flags": flags})
     included_images = [images_by_id[i] for i in report["included"]]
     blockers.extend(_identity_errors(included_images, report["scope"]))
+    report["warnings"].extend(_identity_warnings(included_images))
+    advisory_text = {
+        "missing_label_evidence": "training class definition evidence is not recorded",
+        "out_of_scope_rule": "out-of-scope task definition or supporting evidence is not recorded",
+        "question": "objects retain question marks; review notes remain in the local workspace",
+        "import_error": "identity/source evidence was not recorded at import",
+        "annotation_completeness_unconfirmed": "annotation completeness is not separately asserted; completing review does not assert exhaustive annotation",
+    }
+    for kind, count in sorted(advisory_counts.items()):
+        report["warnings"].append(f"{count} images: {advisory_text[kind]} (advisory)")
     seen = {}
     for iid in report["included"]:
         group, s = groups[iid], split["assignments"][iid]
@@ -568,7 +583,8 @@ def _write_export(dataset, options, workspace, root, report, progress):
             coverage.append({"class_id": cls["id"], "split": s, "objects": len(objects),
                              "images": len({i for i, _ in objects}), "groups": len({groups[i] for i, _ in objects})})
     _csv(root / "group-coverage.csv", ["class_id", "split", "objects", "images", "groups"], coverage)
-    safe_rules = {"research_permission": "verified", "permission_evidence_recorded_locally": True,
+    safe_rules = {"research_permission": dataset.get("rules", {}).get("research_permission", "pending"),
+                  "permission_evidence_recorded_locally": bool(str(dataset.get("rules", {}).get("permission_evidence", "")).strip()),
                   "coordinate_verified": dataset.get("rules", {}).get("coordinate_verified", "legacy_unspecified"),
                   "coordinate_evidence_recorded_locally": bool(str(dataset.get("rules", {}).get("coordinate_evidence", "")).strip()),
                   "annotation_policy": dataset.get("rules", {}).get("annotation_policy"),
@@ -578,13 +594,15 @@ def _write_export(dataset, options, workspace, root, report, progress):
                   "crop_margin": options.get("crop_margin", 0), "min_crop_size": options.get("min_crop_size", 8),
                   "crop_multiple_main_rule": "other visible area >=50% of other box and >=25% of target box area",
                   "crop_multiple_main_override": "not permitted; annotation or crop must be corrected",
-                  "crop_edge_rule": "touching image edge or truncated requires documented include override",
+                  "crop_edge_rule": "touching image edge or truncated requires explicit include; note is optional",
                   "unsupported_ignore_rule": "defer whole detection image",
                   "coordinate_mode": "zero-based half-open; VOC floor(min)+1, ceil(max); crops floor(min), ceil(max)"}
     _json(root / "rules.json", safe_rules)
     _json(root / "review-summary.json", {"mode": options.get("mode", "basic"), "included_images": len(report["included"]),
           "excluded_images": len(report["excluded"]), "reviewed_included_images": report["reviewed_images"],
           "review_coverage": report["reviewed_images"] / len(report["included"]), "counts": report["counts"],
+          "completeness_asserted_included_images": sum(bool(images[i].get("annotations_complete")) for i in report["included"]),
+          "review_meaning": "Operator marked review complete; completeness and clinical correctness are not inferred",
           "classification_crops": len(crop_rows), "classification_excluded": len(report["classification"]["excluded"]),
           "warnings": report["warnings"]})
     _json(root / "manifest.json", {"tool": "marrow-dataset-workbench", "schema_version": 1,
@@ -604,10 +622,10 @@ def _write_export(dataset, options, workspace, root, report, progress):
         f"Mode: {options.get('mode', 'basic')}. Grouping scope: {report['scope']}.\n\n"
         "This package is for the fixed research task recorded in the local source snapshot. "
         "See classes.json, rules.json, split.csv, group-coverage.csv and review-summary.json. "
-        "Research permission evidence and private provenance are retained locally. "
+        "Actual permission status and evidence-presence flags are in rules.json; any supporting documents and private provenance remain local. "
         "This is not an authorization to redistribute. Pixel content requires separate privacy review; "
         "metadata removal and generated IDs do not establish image de-identification. "
-        "Basic exports are exploratory. Review does not establish clinical ground truth. "
+        "Basic exports are exploratory. Review completion records the operator's decision; it does not assert exhaustive annotation or clinical ground truth. "
         "Do not treat previously exposed samples as unseen merely by changing their split names.\n\n"
         "VOC uses 1-based inclusive integer boxes; COCO uses 0-based xywh; YOLO uses "
         "0-based class IDs and normalized center/size. Fractional VOC boxes are conservatively expanded. "

@@ -316,7 +316,6 @@ def clear_split(dataset):
 
 
 def patch_image(dataset, image_id, data):
-    from .exporter import image_issues
     image = next(i for i in dataset['images'] if i['id'] == image_id)
     def context(objects):
         return [(o['id'], o['code'], o['bbox'], bool(o.get('deleted')), bool(o.get('truncated'))) for o in objects]
@@ -355,8 +354,6 @@ def patch_image(dataset, image_id, data):
                 obj['bbox'] = box
             if obj['crop_review'] not in {'pending', 'include', 'exclude'}:
                 raise ValueError('分类裁剪状态无效')
-            if obj['deleted'] and not obj['delete_reason'].strip():
-                raise ValueError('删除框必须填写原因')
             if key in old and (obj['bbox'] != old[key]['bbox'] or obj['code'] != old[key]['code']):
                 obj['crop_review'] = 'pending'
             result.append(obj)
@@ -371,12 +368,10 @@ def patch_image(dataset, image_id, data):
             image[field] = str(data[field])[:10000]
     if 'annotations_complete' in data:
         if not isinstance(data['annotations_complete'], bool):
-            raise ValueError('标注完整性必须明确确认')
+            raise ValueError('标注完整性标记必须为布尔值')
         image['annotations_complete'] = data['annotations_complete']
     if data.get('acknowledge_import_repair'):
         evidence = str(data.get('repair_evidence', '')).strip()
-        if not evidence or not image['annotations_complete']:
-            raise ValueError('结构修复需要依据并确认整图标注完整')
         for obj in image['objects']:
             if obj.get('deleted'):
                 continue
@@ -390,11 +385,10 @@ def patch_image(dataset, image_id, data):
     image['review_state'] = 'excluded' if image['exclude_reason'] else 'in_progress'
     clear_split(dataset)
     if data.get('review_state') == 'confirmed':
-        # Cache invalidation for exporter duplicate indexes before revision increments.
-        checking = dict(dataset, revision=dataset['revision'] + 1)
-        problems = image_issues(checking, image)
-        if problems or not image['annotations_complete'] or image['exclude_reason']:
-            raise ValueError('无法确认：请解决阻断问题并确认本图标注完整性')
+        if image['exclude_reason']:
+            raise ValueError('请先恢复已排除图像，再完成复核')
+        # A review decision does not assert exhaustive annotation or resolve
+        # automatic findings. Those remain visible for the operator/export.
         image['review_state'] = 'confirmed'
     dataset['last_image_id'] = image_id
 
@@ -411,8 +405,6 @@ def patch_mapping(dataset, data):
             raise ValueError('类别编码重复或处理方式无效')
         if not row.get('name', '').strip():
             raise ValueError('类别名称不能为空')
-        if row['role'] in {'cell', 'out_of_scope'} and not row.get('evidence', '').strip():
-            raise ValueError('纳入训练或任务外类别必须记录定义依据')
         if row['role'] == 'cell' and not row.get('train_name', '').strip():
             raise ValueError('训练类别名称不能为空')
         seen.add(code)
@@ -461,8 +453,6 @@ def import_metadata(dataset, text):
         for field in ('patient_id', 'slide_id', 'source_image_id', 'acquisition_batch_id', 'metadata_evidence', 'historical_exposure'):
             if field in row:
                 m[field] = row[field].strip()
-        if any(m.get(k) for k in ('patient_id', 'slide_id', 'source_image_id', 'acquisition_batch_id')) and not m.get('metadata_evidence'):
-            raise ValueError('身份与来源信息必须有证据')
         if m.get('source_image_id') in aliases:
             m['source_image_id'] = aliases[m['source_image_id']]
         byid[key]['metadata'] = m

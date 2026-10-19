@@ -65,13 +65,66 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(second.get(ds['id'])['images'][0]['objects'][0]['bbox'], image['objects'][0]['bbox'])
         finally:
             second.db.close()
-        result = self.request(path, {'expected_revision': 2, 'annotations_complete': True, 'review_state': 'confirmed'}, method='PATCH')
+        result = self.request(path, {'expected_revision': 2, 'review_state': 'confirmed'}, method='PATCH')
         self.assertEqual(result['image']['review_state'], 'confirmed')
         altered = copy.deepcopy(result['image']['objects'])
         altered[0]['raw_code'] = 'FORGED'
         with self.assertRaises(urllib.error.HTTPError):
             self.request(path, {'expected_revision': 3, 'objects': altered}, method='PATCH')
         self.assertEqual(self.store.get(ds['id'])['revision'], 3)
+
+    def test_direct_review_preserves_findings_without_completeness_assertion(self):
+        ds = self.dataset
+        image = copy.deepcopy(ds['images'][0])
+        image['objects'][0]['bbox'] = [-2, 0, 20, 20]
+        image['objects'][0]['question'] = 'Check this object later'
+        path = f"/api/datasets/{ds['id']}/images/{image['id']}"
+        result = self.request(path, {
+            'expected_revision': 1, 'objects': image['objects'],
+            'annotations_complete': False, 'review_state': 'confirmed',
+        }, method='PATCH')
+        self.assertEqual(result['image']['review_state'], 'confirmed')
+        self.assertFalse(result['image']['annotations_complete'])
+        self.assertEqual(result['image']['note'], '')
+        kinds = {issue['kind'] for issue in result['image']['issues']}
+        self.assertTrue({'invalid_box', 'question'}.issubset(kinds))
+        # Review is a workflow marker; it must not erase an operator's question
+        # or silently assert exhaustive labeling.
+        self.assertEqual(result['image']['objects'][0]['question'], 'Check this object later')
+
+    def test_deletion_without_reason_is_persistent_audited_and_reversible(self):
+        ds = self.dataset
+        image = copy.deepcopy(ds['images'][0])
+        obj = image['objects'][0]
+        original = copy.deepcopy(obj)
+        asset = self.store.workspace / image['asset_path']
+        asset_before = digest(asset)
+        obj['deleted'] = True
+        obj['delete_reason'] = ''
+        path = f"/api/datasets/{ds['id']}/images/{image['id']}"
+        result = self.request(path, {'expected_revision': 1, 'objects': image['objects'],
+                                     'review_state': 'confirmed'}, method='PATCH')
+        deleted = result['image']['objects'][0]
+        self.assertTrue(deleted['deleted'])
+        self.assertEqual(deleted['delete_reason'], '')
+        self.assertEqual(deleted['raw_code'], original['raw_code'])
+        self.assertEqual(result['image']['original_objects'][0], original)
+        self.assertNotIn('unsafe_deletion', {i['kind'] for i in result['image']['issues']})
+        second = Store(self.store.workspace)
+        try:
+            self.assertTrue(second.get(ds['id'])['images'][0]['objects'][0]['deleted'])
+            audit = json.loads(second.db.execute(
+                'SELECT payload FROM revisions WHERE dataset_id=? AND revision=2', (ds['id'],)
+            ).fetchone()[0])
+            self.assertTrue(audit['objects'][0]['deleted'])
+            self.assertEqual(audit['objects'][0]['delete_reason'], '')
+        finally:
+            second.db.close()
+        restored = copy.deepcopy(result['image']['objects'])
+        restored[0]['deleted'] = False
+        result = self.request(path, {'expected_revision': 2, 'objects': restored}, method='PATCH')
+        self.assertFalse(result['image']['objects'][0]['deleted'])
+        self.assertEqual(digest(asset), asset_before)
 
     def test_origin_session_host_and_path_rejections(self):
         with self.assertRaises(urllib.error.HTTPError) as err:
@@ -149,11 +202,16 @@ class ServerTests(unittest.TestCase):
         ds=self.dataset
         image=ds['images'][0]
         result=self.store.update(ds['id'],1,'synthetic damaged annotation',lambda d:d['images'][0].update(import_issues=['missing_annotation']))
-        with self.assertRaises(ValueError):
-            self.store.update(ds['id'],2,'repair',lambda d:patch_image(d,image['id'],{'acknowledge_import_repair':True,'annotations_complete':True}))
-        result=self.store.update(ds['id'],2,'repair',lambda d:patch_image(d,image['id'],{'acknowledge_import_repair':True,'annotations_complete':True,'repair_evidence':'Synthetic reviewed exhaustive boxes'}))
+        result=self.store.update(ds['id'],2,'repair',lambda d:patch_image(d,image['id'],{'acknowledge_import_repair':True,'annotations_complete':False}))
         self.assertEqual(result['images'][0]['import_issues'],[])
         self.assertEqual(len(result['images'][0]['repair_records']),1)
+        self.assertEqual(result['images'][0]['repair_records'][0]['evidence'],'')
+        self.assertFalse(result['images'][0]['annotations_complete'])
+        invalid=copy.deepcopy(result['images'][0]['objects'])
+        invalid[0]['bbox']=[-1,0,10,10]
+        with self.assertRaises(ValueError):
+            self.store.update(ds['id'],3,'invalid repair',lambda d:patch_image(d,image['id'],{'objects':invalid,'acknowledge_import_repair':True}))
+        self.assertEqual(self.store.get(ds['id'])['revision'],3)
         entered,release=threading.Event(),threading.Event()
         def task(progress):
             entered.set();release.wait(timeout=3);progress(.5,'check cancellation')

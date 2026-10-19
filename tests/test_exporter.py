@@ -119,15 +119,18 @@ class ExporterTests(unittest.TestCase):
         self.assertEqual(len({split["assignments"][f"i{i}"] for i in range(4)}), 1)
         self.assertEqual(set(split["assignments"].values()), {"train", "val", "test"})
 
-    def test_unknown_ignore_deletion_and_explicit_exclusion(self):
+    def test_unknown_ignore_deletion_without_reason_and_explicit_exclusion(self):
         im = self.ds["images"][0]
         im["objects"][0]["code"] = "?"
         self.revise()
         self.assertIn("unresolved", {x["kind"] for x in image_issues(self.ds, im)})
-        im["objects"][0].update(deleted=True, delete_reason="hide it")
+        im["objects"][0].update(deleted=True, delete_reason="")
         self.revise()
-        self.assertIn("unsafe_deletion", {x["kind"] for x in image_issues(self.ds, im)})
-        im["objects"][0]["delete_reason"] = "false_annotation: synthetic artifact"
+        self.assertFalse(image_issues(self.ds, im))
+        report = preflight(self.ds, {**self.options, "classification": False}, self.root)
+        self.assertTrue(report["ready"])
+        self.assertIn(im["id"], report["included"])
+        im["objects"][0]["delete_reason"] = "optional operator note without a special prefix"
         self.revise()
         self.assertFalse(image_issues(self.ds, im))
         im["objects"][0].update(deleted=False, code="x")
@@ -154,7 +157,7 @@ class ExporterTests(unittest.TestCase):
         self.revise()
         self.assertFalse(image_issues(self.ds, images[0]))
 
-    def test_basic_strict_completeness_and_crop_risks(self):
+    def test_review_selection_optional_completeness_and_crop_risks(self):
         im = self.ds["images"][0]
         im.update(review_state="pending", annotations_complete=False)
         im["objects"][0].pop("crop_review")
@@ -164,8 +167,9 @@ class ExporterTests(unittest.TestCase):
         strict = preflight(self.ds, self.options, self.root)
         self.assertNotIn("i0", strict["included"])
         self.ds["rules"]["annotation_policy"] = "unknown"
-        self.assertNotIn("i0", preflight(self.ds, {**self.options, "mode": "basic"}, self.root)["included"])
-        im.update(review_state="confirmed", annotations_complete=True)
+        self.assertIn("i0", preflight(self.ds, {**self.options, "mode": "basic"}, self.root)["included"])
+        im.update(review_state="confirmed", annotations_complete=False)
+        self.assertIn("i0", preflight(self.ds, self.options, self.root)["included"])
         im["objects"].append({"id": "o2", "code": "a", "bbox": [4, 5, 12, 15]})
         self.revise()
         report = preflight(self.ds, {**self.options, "mode": "basic"}, self.root)
@@ -176,7 +180,7 @@ class ExporterTests(unittest.TestCase):
         self.assertTrue(any(x["object_id"] == "o1" and "multiple_main_objects" in x["reasons"]
                             for x in report["classification"]["excluded"]))
 
-    def test_hash_path_group_and_permission_gates(self):
+    def test_hash_path_and_group_gates_with_permission_advisory(self):
         im = self.ds["images"][0]
         im["asset_path"] = "../escape.png"
         report = preflight(self.ds, self.options, self.root)
@@ -184,8 +188,11 @@ class ExporterTests(unittest.TestCase):
         im["asset_path"] = "synthetic-0.png"
         (self.root / im["asset_path"]).write_bytes(b"changed")
         self.assertNotIn("i0", preflight(self.ds, self.options, self.root)["included"])
+        before_permission_change = preflight(self.ds, self.options, self.root)
         self.ds["rules"]["research_permission"] = "pending"
-        self.assertFalse(preflight(self.ds, self.options, self.root)["ready"])
+        after_permission_change = preflight(self.ds, self.options, self.root)
+        self.assertEqual(before_permission_change["ready"], after_permission_change["ready"])
+        self.assertTrue(any("Research permission" in w for w in after_permission_change["warnings"]))
         self.ds["images"][1]["metadata"]["patient_id"] = self.ds["images"][2]["metadata"]["patient_id"]
         self.revise()
         report = preflight(self.ds, self.options, self.root)
@@ -202,6 +209,9 @@ class ExporterTests(unittest.TestCase):
 
     def test_identity_and_insufficient_group_failure(self):
         self.ds["images"][0]["metadata"]["metadata_evidence"] = ""
+        split = plan_split(self.ds, [1, 1, 1], 0, "patient")
+        self.assertTrue(split["warnings"])
+        self.ds["images"][0]["metadata"]["patient_id"] = ""
         with self.assertRaises(ValueError):
             plan_split(self.ds, [1, 1, 1], 0, "patient")
         for im in self.ds["images"]:
@@ -220,28 +230,72 @@ class ExporterTests(unittest.TestCase):
         self.ds["split"]["assignments"].update(i0="train", i1="val")
         self.assertTrue(any("crosses splits" in b for b in preflight(self.ds, self.options, self.root)["blockers"]))
 
-    def test_mapping_requires_evidence_even_for_direct_snapshot(self):
+    def test_direct_review_without_operator_evidence_exports_truthful_status(self):
         self.ds["mapping"]["entries"][0]["evidence"] = ""
+        self.ds["mapping"]["entries"].append({"code": "outside", "name": "Task-excluded object", "role": "out_of_scope"})
+        self.ds["rules"] = {"research_permission": "pending", "permission_evidence": "",
+                            "annotation_policy": "unknown", "annotation_evidence": "",
+                            "coordinate_verified": "pending", "coordinate_evidence": ""}
+        for image in self.ds["images"]:
+            image["annotations_complete"] = False
+            image["metadata"]["metadata_evidence"] = ""
+            image["import_issues"] = ["identity_without_evidence"]
+        image = self.ds["images"][0]
+        image["objects"][0]["question"] = "private-review-comment"
+        image["objects"].append({"id": "outside", "code": "outside", "bbox": [20, 5, 25, 10]})
         self.revise()
         report = preflight(self.ds, self.options, self.root)
-        self.assertFalse(report["ready"])
-        self.assertTrue(all("missing_label_evidence" in x["reasons"] for x in report["excluded"]))
+        self.assertTrue(report["ready"], report["blockers"])
+        self.assertEqual(len(report["included"]), 6)
+        self.assertFalse(report["excluded"])
+        issues = image_issues(self.ds, image)
+        self.assertTrue({"question", "missing_label_evidence", "out_of_scope_rule", "import_error"}.issubset({i["kind"] for i in issues}))
+        self.assertTrue(all(i.get("severity") == "warning" for i in issues))
+        self.assertTrue(any("question marks" in w for w in report["warnings"]))
+        result = build_export(self.ds, self.options, self.root, self.root / "optional-evidence")
+        output = Path(result["path"])
+        rules = json.loads((output / "rules.json").read_text())
+        self.assertEqual(rules["research_permission"], "pending")
+        self.assertFalse(rules["permission_evidence_recorded_locally"])
+        self.assertEqual(rules["coordinate_verified"], "pending")
+        self.assertFalse(rules["coordinate_evidence_recorded_locally"])
+        summary = json.loads((output / "review-summary.json").read_text())
+        self.assertEqual(summary["reviewed_included_images"], 6)
+        self.assertEqual(summary["completeness_asserted_included_images"], 0)
+        self.assertNotIn("private-review-comment", (output / "review-summary.json").read_text())
+
+    def test_edge_crop_explicit_include_needs_no_reason(self):
+        image = self.ds["images"][0]
+        image["objects"][0].update(bbox=[0, 4, 13, 16], crop_review="include", crop_note="")
+        self.revise()
+        report = preflight(self.ds, self.options, self.root)
+        self.assertTrue(report["ready"])
+        crop = next(c for c in report["classification"]["included"] if c["image_id"] == image["id"])
+        self.assertIn("edge_or_truncation", crop["flags"])
+        image["objects"][0]["crop_review"] = "pending"
+        self.revise()
+        report = preflight(self.ds, self.options, self.root)
+        excluded = next(c for c in report["classification"]["excluded"] if c["image_id"] == image["id"])
+        self.assertIn("edge_or_truncation", excluded["reasons"])
 
     def test_component_scope_still_rejects_known_identity_conflict(self):
         self.ds["images"][1]["metadata"]["slide_id"] = self.ds["images"][0]["metadata"]["slide_id"]
         with self.assertRaisesRegex(ValueError, "conflicting patient"):
             plan_split(self.ds, [1, 1, 1], 0, "component")
 
-    def test_coordinate_confirmation_requires_overlay_evidence_when_declared(self):
+    def test_coordinate_evidence_is_advisory_when_declared(self):
         self.assertTrue(preflight(self.ds, self.options, self.root)["ready"])
         rules = self.ds["rules"]
         rules.update(coordinate_verified="pending", coordinate_evidence="")
-        self.assertIn("Confirm source coordinate interpretation against image overlays",
-                      preflight(self.ds, self.options, self.root)["blockers"])
+        report = preflight(self.ds, self.options, self.root)
+        self.assertTrue(report["ready"])
+        self.assertTrue(any("Source coordinate interpretation" in w for w in report["warnings"]))
         rules["coordinate_verified"] = "verified"
-        self.assertFalse(preflight(self.ds, self.options, self.root)["ready"])
-        rules["coordinate_evidence"] = "Synthetic border box checked against original image overlay"
         self.assertTrue(preflight(self.ds, self.options, self.root)["ready"])
+        rules["coordinate_evidence"] = "Synthetic border box checked against original image overlay"
+        report = preflight(self.ds, self.options, self.root)
+        self.assertTrue(report["ready"])
+        self.assertFalse(any("Source coordinate interpretation" in w for w in report["warnings"]))
 
     def test_one_pixel_and_fractional_coordinate_semantics(self):
         for im in self.ds["images"]:
